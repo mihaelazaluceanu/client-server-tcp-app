@@ -1,5 +1,6 @@
 SOURCES1 = server.cpp
 SOURCES2 = subscriber.cpp
+SOURCES3 = common.cpp
 
 exe1 = server
 exe2 = subscriber
@@ -10,8 +11,8 @@ CC = g++
 .PHONY: build clean pack
 
 build:
-		$(CC) $(CCFLAGS) $(SOURCES1) -o $(exe1)
-		$(CC) $(CCFLAGS) $(SOURCES2) -o $(exe2)
+		$(CC) $(CCFLAGS) $(SOURCES1) $(SOURCES3) -o $(exe1)
+		$(CC) $(CCFLAGS) $(SOURCES2) $(SOURCES3) -o $(exe2)
 
 run-exe1:
 		./$(exe1)
