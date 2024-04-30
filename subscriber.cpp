@@ -58,9 +58,8 @@ void set_server_addr(struct sockaddr_in &serv_addr, uint16_t port, in_addr_t add
 }
 
 void start_client(int tcp_sock_fd) {
-    cout << "Client started." << endl;
     int rec;
-    char buffer[TCP_MSG_LEN];
+    char buffer[BUFF_LEN];
 
     struct pollfd poll_fds[MAX_CONNECTIONS];
     int num_clients = 2;
@@ -78,31 +77,54 @@ void start_client(int tcp_sock_fd) {
 
         if (poll_fds[0].revents & POLLIN != 0) {
             // se citeste de la tastatura
-            memset(buffer, 0, TCP_MSG_LEN);
-            rec = read(poll_fds[0].fd, buffer, TCP_MSG_LEN);
+            memset(buffer, 0, BUFF_LEN);
+            rec = read(poll_fds[0].fd, buffer, BUFF_LEN);
             DIE(rec <= 0, "[CLIENT] Error while reading from stdin.");
+            buffer[rec - 1] = '\0';
 
             if (strncmp(buffer, "exit", 4) == 0) {
-                // se inchide conexiunea
-                close(tcp_sock_fd);
+                int buff_len = strlen(buffer);
+                // se trimite dimensiunea buffer-ului catre server
+                rec = send_all(tcp_sock_fd, &buff_len, sizeof(int));
+                DIE(rec < 0, "[CLIENT] Unable to send message.");
 
-                for (int i = 0; i < num_clients; i++) {
-                    close(poll_fds[i].fd);
-                }
+                // se trimite mesajul catre server
+                rec = send_all(tcp_sock_fd, (void *)buffer, buff_len);
+                DIE(rec < 0, "[CLIENT] Unable to send message.");
 
                 memset(buffer, 0, BUFF_LEN);
+                // se inchide conexiunea
+                close(tcp_sock_fd);
+                close(STDIN_FILENO);
                 exit(0);
             } else {
+                int buff_len = strlen(buffer);
+                // se trimite dimensiunea buffer-ului catre server
+                rec = send_all(tcp_sock_fd, &buff_len, sizeof(int));
+                DIE(rec < 0, "[CLIENT] Unable to send message.");
+
                 // se trimite mesajul catre server
-                rec = send(tcp_sock_fd, (void *)buffer, strlen(buffer), 0);
-                cout << buffer << endl;
+                rec = send_all(tcp_sock_fd, (void *)buffer, buff_len);
                 DIE(rec < 0, "[CLIENT] Unable to send message.");
             }
         } else if (poll_fds[1].revents & POLLIN != 0) {
             // se primeste mesaj de la server
             memset(buffer, 0, BUFF_LEN);
-            rec = recv_all(tcp_sock_fd, (void *)buffer, BUFF_LEN);
-            DIE(rec < 0, "[CLIENT] Unable to receive message.");
+
+            // se primeste un dimensiunea mesajului de la server
+            int buff_len;
+            rec = recv_all(poll_fds[1].fd, &buff_len, sizeof(int));
+            DIE(rec < 0, "[CLIENT] Error while receiving message length from server.");
+
+            // se primeste mesajul de la server
+            rec = recv_all(tcp_sock_fd, (void *)buffer, buff_len);
+            DIE(rec < 0, "[CLIENT] Unable to receive the message from the server.");
+
+            if (strcmp(buffer, "exit") == 0) {
+                // se inchide conexiunea
+                close(tcp_sock_fd);
+                exit(0);
+            }
         }
     }
 }
@@ -130,9 +152,6 @@ int main(int argc, char *argv[]) {
     // se conecteaza la server
     rec = connect(sockfd, (struct sockaddr *)&serv_addr, socket_len);
     DIE(rec < 0, "[CLIENT] Unable to connect to server.");
-    if (rec == 0) {
-        cout << "Connected to server." << endl;
-    }
 
     char client_id[ID_LEN + 1];
     memset(client_id, 0, ID_LEN + 1);
@@ -140,10 +159,6 @@ int main(int argc, char *argv[]) {
 
     rec = send_all(sockfd, (void *)client_id, ID_LEN + 1);
     DIE(rec < 0, "[CLIENT] Unable to send client id.");
-
-    if (rec != -1) {
-        cout << "Client's id: " << client_id << " was send." << endl;
-    }
 
     start_client(sockfd);
 

@@ -124,7 +124,6 @@ int check_subscriber(char *new_id, int new_sock_fd) {
 }
 
 void start_server(int tcp_sock_fd, int udp_sock_fd) {
-  // cout << "Server started." << endl;
   int rec;
   char buffer[BUFF_LEN];
 
@@ -152,7 +151,6 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
     // se verifica daca s-a primit un mesaj de la un client
     for (int i = 0; i < num_clients; i++) {
       if (poll_fds[i].revents & POLLIN != 0) {
-        // cout << "New client." << endl;
         // conexiune de tip TCP
         if (poll_fds[i].fd == tcp_sock_fd) {
           struct sockaddr_in client_addr;
@@ -161,9 +159,6 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
           // se accepta noua conexiune de tip TCP
           int new_client_fd = accept(tcp_sock_fd, (struct sockaddr *)&client_addr, &client_len);
           DIE(new_client_fd < 0, "[SERV] Error while accepting new TCP connection.");
-          // if (new_client_fd != -1) {
-          //   cout << "Client connected." << endl;
-          // }
 
           // se adauga noul socket in lista de socketuri
           poll_fds[num_clients].fd = new_client_fd;
@@ -173,30 +168,23 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
           char new_id[ID_LEN + 1];
           memset(new_id, 0, ID_LEN + 1);
           // se obtine ID-ul clientului
-          // cout << "Receiving client's ID." << endl;
           rec = recv_all(new_client_fd, (void *)new_id, ID_LEN + 1);
           DIE(rec < 0, "[SERV] Error while receiving the client's ID.");
-          // if (rec != -1) {
-          //   cout << "Client ID: " << new_id << endl;
-          // }
 
           // se verifica statusul clientului
           int status = check_subscriber(new_id, new_client_fd);
-          // cout << "Status: " << status << endl;
           if (status == CONNECTED) {
             cout << "Client " << new_id << " already connected." << endl;
             close(new_client_fd);
             num_clients--;
           } else if (status == RECONNECTED) {
-            // trimite mesaj ?????
-            // ce se intampla in cazul asta heeeeeeelp
             cout << "New client " << new_id << " connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << "." << endl;
             // caut in bufferul cu mesaje stocate clientul reconectat
             // trimit toate mesajele stocate pentru clientul respectiv
           } else if (status == FIRST_CONNECTION) {
             cout << "New client " << new_id << " connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << "." << endl;
           }
-        } else if (poll_fds[1].fd == udp_sock_fd) {
+        } else if (poll_fds[i].fd == udp_sock_fd) {
           struct sockaddr_in client_addr;
           socklen_t client_len = sizeof(struct sockaddr_in);
 
@@ -209,30 +197,59 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
 
           // nu stiu ce tre sa se intample cand primesc asa mesaj
 
-        } else if (poll_fds[0].fd == STDIN_FILENO) {
+        } else if (poll_fds[i].fd == STDIN_FILENO) {
+          cout << "Stdin command:";
           // se citeste comanda de la tastatura
           memset(buffer, 0, BUFF_LEN);
           rec = read(STDIN_FILENO, buffer, BUFF_LEN);
           DIE(rec <= 0, "[SERV] Error while reading from stdin.");
+          buffer[rec - 1] = '\0';
+          cout << buffer << endl;
 
-          if (strncmp(buffer, "exit", 4) == 0) {
+          if (strcmp(buffer, "exit") == 0) {
             close(poll_fds[0].fd);
             close(tcp_sock_fd);
             close(udp_sock_fd);
 
+            int buff_len = strlen(buffer);
+
+            // trimitem mesaj clientilor sa se inchida
             for (int j = 3; j < num_clients; j++) {
+              // se trimite dimensiunea buffer-ului catre client
+              rec = send_all(poll_fds[j].fd, &buff_len, sizeof(int));
+              DIE(rec < 0, "[SERV] Unable to send buffer's length to client.");
+
+              // se trimite mesajul catre client
+              rec = send_all(poll_fds[j].fd, (void *)buffer, buff_len);
+              DIE(rec < 0, "[SERV] Error while sending the exit message to client.");
               close(poll_fds[j].fd);
             }
 
+            memset(buffer, 0, BUFF_LEN);
             exit(0);
           } else {
             cout << "Invalid command." << endl;
           }
         } else {
-          // se primeste un mesaj de la un client TCP
+          // se primeste un dimensiunea mesajului de la un client TCP
+          int buff_len;
+          rec = recv_all(poll_fds[i].fd, &buff_len, sizeof(int));
+          DIE(rec < 0, "[SERV] Error while receiving message length from client.");
+
           memset(buffer, 0, BUFF_LEN);
-          rec = recv_all(poll_fds[i].fd, (void *)buffer, BUFF_LEN);
+          // se primeste mesajul de la client
+          rec = recv_all(poll_fds[i].fd, (void *)buffer, buff_len);
           DIE(rec < 0, "[SERV] Error while receiving message from client.");
+
+          // se verifica daca mesajul este de tip "exit"
+          if (strcmp(buffer, "exit") == 0) {
+            cout << "Client " << subscribers[i - 3].id << " disconnected." << endl;
+            close(poll_fds[i].fd);
+            poll_fds[i].fd = -1;
+            num_clients--;
+          } else {
+            cout << "Received from client " << subscribers[i - 3].id << ": " << buffer << endl;
+          }
 
 
         }
