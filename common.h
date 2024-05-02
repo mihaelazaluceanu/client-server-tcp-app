@@ -3,12 +3,13 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <vector>
+using namespace std;
 
 int recv_all(int sockfd, void *buffer, size_t len);
 int send_all(int sockfd, void *buffer, size_t len);
 
 #define ID_LEN 10
-#define TCP_MSG_LEN 64 // longest message is 63 characters + '\0' and '\n'
 #define BUFF_LEN 1600
 #define TOPIC_SIZE 50
 #define CONTENT_LEN 1500
@@ -16,21 +17,38 @@ int send_all(int sockfd, void *buffer, size_t len);
 // structura pentru mesajul de la clientul UDP la server
 struct udp_message {
   char topic[TOPIC_SIZE];
-  uint8_t data_type;
+  uint8_t type;
+  char content[CONTENT_LEN];
+};
+
+// incapsuleaza un mesaj de la clientul UDP -> server -> clientul TCP
+struct tcp_message {
+  char ip[16];
+  uint16_t port;
+  char topic[TOPIC_SIZE];
+  uint8_t type;
   char content[CONTENT_LEN];
 };
 
 #define MAX_CONNECTIONS 100
-// status: reconectat = 1, conectat = 0, prima conectare = -1
-#define CONNECTED 0
-#define RECONNECTED 1
-#define FIRST_CONNECTION -1
+// status: conectat = 1, deconectat = -1, prima conectare = 0
+#define CONNECTED 1
+#define DISCONNECTED -1
+#define FIRST_CONNECTION 0
 
-struct tcp_subscriber {
+struct udp_to_tcp_message {
+  char udp_ip[16];
+  uint16_t udp_port;
+  char topic[TOPIC_SIZE];
+  uint8_t type;
+  char content[CONTENT_LEN];
+};
+
+struct tcp_client {
   int tcp_sock_fd;
   int status; 
   char id[10];
-  // struct tcp_topic *topic;
+  vector<string> topics;
 };
 
 #endif

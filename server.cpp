@@ -10,13 +10,14 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <vector>
+#include <algorithm>
 #include <netinet/tcp.h>
 #include "helpers.h"
 #include "common.h"
 using namespace std;
 
 // vector de clienti TCP
-vector<struct tcp_subscriber> subscribers;
+vector<struct tcp_client> clients;
 
 int recv_all(int sockfd, void *buffer, size_t len) {
     size_t bytes_received = 0;
@@ -94,28 +95,30 @@ void set_server_addr(struct sockaddr_in &serv_addr, uint16_t port, socklen_t *so
 }
 
 int check_subscriber(char *new_id, int new_sock_fd) {
-  for (int i = 0; i < subscribers.size(); i++) {
-    if (strcmp(subscribers[i].id, new_id) == 0) {
-      if (subscribers[i].status == CONNECTED) {
+  for (int i = 0; i < clients.size(); i++) {
+    if (strcmp(clients[i].id, new_id) == 0) {
+      if (clients[i].status == CONNECTED) {
+        // clientul este deja conectat si activ
         return CONNECTED;
       } else {
-        subscribers[i].tcp_sock_fd = new_sock_fd;
-        subscribers[i].status = CONNECTED;
+        // clientul a mai fost conectat si s-a reconectat
+        clients[i].tcp_sock_fd = new_sock_fd;
+        clients[i].status = CONNECTED;
 
         int flag = 1;
         setsockopt(new_sock_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
         
-        return RECONNECTED;
+        return DISCONNECTED;
       }
     }
   }
 
   // clientul este nou
-  struct tcp_subscriber new_subscriber;
-  new_subscriber.tcp_sock_fd = new_sock_fd;
-  new_subscriber.status = CONNECTED;
-  memcpy(new_subscriber.id, new_id, 10);
-  subscribers.push_back(new_subscriber);
+  struct tcp_client new_client;
+  new_client.tcp_sock_fd = new_sock_fd;
+  new_client.status = CONNECTED;
+  memcpy(new_client.id, new_id, 10);
+  clients.push_back(new_client);
 
   int flag = 1;
   setsockopt(new_sock_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
@@ -160,6 +163,10 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
           int new_client_fd = accept(tcp_sock_fd, (struct sockaddr *)&client_addr, &client_len);
           DIE(new_client_fd < 0, "[SERV] Error while accepting new TCP connection.");
 
+          // se dezactiveaza algoritmul lui Nagle
+          int flag = 1;
+          rec = setsockopt(new_client_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
+
           // se adauga noul socket in lista de socketuri
           poll_fds[num_clients].fd = new_client_fd;
           poll_fds[num_clients].events = POLLIN;
@@ -175,12 +182,25 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
           int status = check_subscriber(new_id, new_client_fd);
           if (status == CONNECTED) {
             cout << "Client " << new_id << " already connected." << endl;
+            
+            // se trimite mesajul de exit catre client
+            memset(buffer, 0, BUFF_LEN);
+            memcpy(buffer, "exit", 4);
+            buffer[4] = '\0';
+            int buff_len = strlen(buffer);
+
+            // se trimite dimensiunea buffer-ului catre client
+            rec = send_all(new_client_fd, &buff_len, sizeof(int));
+            DIE(rec < 0, "[SERV] Unable to send buffer's length to client.");
+
+            // se trimite mesajul catre client
+            rec = send_all(new_client_fd, (void *)buffer, buff_len);
+            DIE(rec < 0, "[SERV] Error while sending the exit message to client.");
+
             close(new_client_fd);
             num_clients--;
-          } else if (status == RECONNECTED) {
+          } else if (status == DISCONNECTED) {
             cout << "New client " << new_id << " connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << "." << endl;
-            // caut in bufferul cu mesaje stocate clientul reconectat
-            // trimit toate mesajele stocate pentru clientul respectiv
           } else if (status == FIRST_CONNECTION) {
             cout << "New client " << new_id << " connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << "." << endl;
           }
@@ -190,21 +210,49 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
 
           // se primeste un mesaj de la un client UDP
           memset(buffer, 0, BUFF_LEN);
-          rec = recvfrom(udp_sock_fd, buffer, sizeof(struct udp_message), 0, (struct sockaddr *)&client_addr, &client_len);
+          rec = recvfrom(udp_sock_fd, (void *)buffer, sizeof(struct udp_message), 0, (struct sockaddr *)&client_addr, &client_len);
           DIE(rec < 0, "[SERV] Error while receiving message from UDP client.");
 
           struct udp_message *udp_msg = (struct udp_message *)buffer;
+          // printf ("topic {%s} type {%u} content {%s}\n", udp_msg->topic, udp_msg->type, udp_msg->content);
 
-          // nu stiu ce tre sa se intample cand primesc asa mesaj
+          // incapsulare mesaj de la clientul UDP -> server -> clientul TCP
+          struct udp_to_tcp_message msg;
+          memset(&msg, 0, sizeof(struct udp_to_tcp_message));
+          memcpy(msg.udp_ip, inet_ntoa(client_addr.sin_addr), 16);
+          msg.udp_port = ntohs(client_addr.sin_port);
+          memcpy(msg.topic, udp_msg->topic, TOPIC_SIZE);
+          msg.type = udp_msg->type;
+          memcpy(msg.content, udp_msg->content, CONTENT_LEN);
+
+          // cout << msg.udp_ip << ":" << msg.udp_port << " - " << msg.topic << " - " << msg.type << " - " << msg.content << endl;
+
+          int msg_len = sizeof(struct udp_to_tcp_message);
+          // cout << "msg_len: " << msg_len << endl;
+
+          // se trimite mesajul catre clientii TCP
+          for (int j = 0; j < clients.size(); j++) {
+            if (clients[j].status == CONNECTED) {
+              if (find(clients[j].topics.begin(), clients[j].topics.end(), msg.topic) != clients[j].topics.end()) {
+                // se trimite dimensiunea mesajului catre client
+                rec = send_all(clients[j].tcp_sock_fd, &msg_len, sizeof(int));
+                DIE(rec < 0, "[SERV] Unable to send message's length to client.");
+
+                // se trimite mesajul catre clientul TCP
+                rec = send_all(clients[j].tcp_sock_fd, (void *)&msg, msg_len);
+                DIE(rec < 0, "[SERV] Error while sending message to client.");
+
+                // cout << "Message with topic " << msg.topic << " was sent to client " << clients[j].id << "." << endl;
+              }
+            }
+          }
 
         } else if (poll_fds[i].fd == STDIN_FILENO) {
-          cout << "Stdin command:";
           // se citeste comanda de la tastatura
           memset(buffer, 0, BUFF_LEN);
           rec = read(STDIN_FILENO, buffer, BUFF_LEN);
           DIE(rec <= 0, "[SERV] Error while reading from stdin.");
           buffer[rec - 1] = '\0';
-          cout << buffer << endl;
 
           if (strcmp(buffer, "exit") == 0) {
             close(poll_fds[0].fd);
@@ -215,6 +263,10 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
 
             // trimitem mesaj clientilor sa se inchida
             for (int j = 3; j < num_clients; j++) {
+              if (poll_fds[j].fd == -1) {
+                continue;
+              }
+
               // se trimite dimensiunea buffer-ului catre client
               rec = send_all(poll_fds[j].fd, &buff_len, sizeof(int));
               DIE(rec < 0, "[SERV] Unable to send buffer's length to client.");
@@ -243,15 +295,76 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
 
           // se verifica daca mesajul este de tip "exit"
           if (strcmp(buffer, "exit") == 0) {
-            cout << "Client " << subscribers[i - 3].id << " disconnected." << endl;
-            close(poll_fds[i].fd);
-            poll_fds[i].fd = -1;
-            num_clients--;
-          } else {
-            cout << "Received from client " << subscribers[i - 3].id << ": " << buffer << endl;
+            for (int j = 0; j < clients.size(); j++) {
+              if (clients[j].tcp_sock_fd == poll_fds[i].fd) {
+                cout << "Client " << clients[j].id << " disconnected." << endl;
+                clients[j].status = DISCONNECTED;
+                close(poll_fds[i].fd);
+                poll_fds[i].fd = -1;
+                break;
+              }
+            }
+          } else if (strstr(buffer, "subscribe ") == buffer) {
+            char cpy[buff_len];
+            strcpy(cpy, buffer);
+            // se separa topic-ul de la mesaj
+            char *token = strtok(cpy, " ");
+            token = strtok(NULL, " ");
+            token[strlen(token)] = '\0';
+
+            for (int j = 0; j < clients.size(); j++) {
+              if (clients[j].tcp_sock_fd == poll_fds[i].fd) {
+                clients[j].topics.push_back(token);
+
+                // se trimite mesajul de confirmare catre client
+                memset(buffer, 0, BUFF_LEN);
+                memcpy(buffer, "Subscribed to topic ", 20);
+                buffer[strlen(buffer)] = '\0';
+                strcat(buffer, token);
+
+                int buff_len = strlen(buffer);
+                // se trimite dimensiunea buffer-ului catre client
+                rec = send_all(poll_fds[i].fd, &buff_len, sizeof(int));
+                DIE(rec < 0, "[SERV] Unable to send buffer's length to client.");
+
+                // se trimite mesajul catre client
+                rec = send_all(poll_fds[i].fd, (void *)buffer, buff_len);
+                DIE(rec < 0, "[SERV] Error while sending the exit message to client.");
+
+                break;
+              }
+            }
+          } else if (strstr(buffer, "unsubscribe ") == buffer) {
+            char cpy[buff_len];
+            strcpy(cpy, buffer);
+            // se separa topic-ul de la mesaj
+            char *token = strtok(cpy, " ");
+            token = strtok(NULL, " ");
+            token[strlen(token)] = '\0';
+
+            for (int j = 0; j < clients.size(); j++) {
+              if (clients[j].tcp_sock_fd == poll_fds[i].fd) {
+                clients[j].topics.erase(remove(clients[j].topics.begin(), clients[j].topics.end(), token), clients[j].topics.end());
+
+                // se trimite mesajul de confirmare catre client
+                memset(buffer, 0, BUFF_LEN);
+                memcpy(buffer, "Unsubscribed from topic ", 24);
+                buffer[strlen(buffer)] = '\0';
+                strcat(buffer, token);
+
+                int buff_len = strlen(buffer);
+                // se trimite dimensiunea buffer-ului catre client
+                rec = send_all(poll_fds[i].fd, &buff_len, sizeof(int));
+                DIE(rec < 0, "[SERV] Unable to send buffer's length to client.");
+
+                // se trimite mesajul catre client
+                rec = send_all(poll_fds[i].fd, (void *)buffer, buff_len);
+                DIE(rec < 0, "[SERV] Error while sending the exit message to client.");
+
+                break;
+              }
+            }
           }
-
-
         }
       }
     }
