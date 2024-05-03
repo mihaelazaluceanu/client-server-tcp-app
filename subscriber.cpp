@@ -134,26 +134,32 @@ void start_client(int sockfd) {
             // a fost receptionat un mesaj UDP
             } else if (rec > 50) {
                 char ip[16];
-                memcpy(ip, buffer, 16);
-                uint16_t port = ntohs(*(uint16_t *)(buffer + 16));
+                strncpy(ip, buffer, 15);
+                ip[16] = '\0';
+                uint16_t port = *(uint16_t *)(buffer + 16);
                 
                 struct udp_message *udp_message = (struct udp_message *)(buffer + sizeof(ip) + sizeof(port));
 
-                char *aux = udp_message->content;
                 if (udp_message->type == 0) {
-                    cout << udp_message->topic << " - " << "INT - " << (udp_message->content[0] == 1 ? "-" : "") << ntohl(*(int *)(udp_message->content + 1)) << endl;
+                    uint8_t sign_byte = udp_message->content[0];
+                    uint32_t nr = ntohl(*(uint32_t *)(udp_message->content + 1));
+                    int print = nr;
+
+                    if (sign_byte == 1) {
+                        print = -print;
+                    }
+
+                    cout << udp_message->topic << " - " << "INT - " << print << endl;
                 } else if (udp_message->type == 1) {
-                    cout << udp_message->topic << " - " << "SHORT_REAL - " << fixed << setprecision(2) << (ntohs(*(short *)(udp_message->content))) / 100.0 << endl;
+                    cout << udp_message->topic << " - " << "SHORT_REAL - " << fixed << setprecision(2) << (ntohs(*(uint16_t *)(udp_message->content))) / 100.0 << endl;
                 } else if (udp_message->type == 2) {
-                    uint8_t sign_byte = aux[0];
-                    uint32_t concatenated_number = ntohl(*(uint32_t *) (aux + 1));
-                    uint8_t power = aux[5];
+                    uint8_t sign_byte = udp_message->content[0];
+                    uint32_t nr = ntohl(*(uint32_t *) (udp_message->content + 1));
+                    uint8_t power = udp_message->content[5];
                     float div = pow(10, power);
-                    float result = concatenated_number / div;
+                    float result = nr / div;
                     cout << udp_message->topic << " - " << "FLOAT - " << (sign_byte == 1 ? "-" : "") << fixed << setprecision(power) << result << endl;
 
-                    // float x = (ntohl(*(int *)(udp_message->content + 1))) / pow(10, udp_message->content[6]);
-                    // cout << udp_message->topic << " - " << "FLOAT - " << (udp_message->content[0] == 1 ? "-" : "") << fixed << setprecision(udp_message->content[6]) << aux << endl;
                 } else if (udp_message->type == 3) {
                     cout << udp_message->topic << " - " << "STRING - " << udp_message->content << endl;
                 }

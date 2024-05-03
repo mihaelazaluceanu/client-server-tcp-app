@@ -19,6 +19,9 @@ using namespace std;
 // vector de clienti TCP
 vector<struct tcp_client> clients;
 
+// vectori de topicuri
+// vector<string> topics;
+
 int recv_all(int sockfd, void *buffer, size_t len) {
     size_t bytes_received = 0;
     size_t bytes_remaining = len;
@@ -62,6 +65,10 @@ void init_udp_client(int &udp_sock_fd, struct sockaddr_in &udp_subscriber_addr, 
   udp_sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
   DIE(udp_sock_fd < 0, "[SERV] Error while creating UDP socket.");
 
+  // se dezactiveaza algoritmul lui Nagle
+  int flag = 1;
+  setsockopt(udp_sock_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
+
   memset(&udp_subscriber_addr, 0, sizeof(udp_subscriber_addr));
   udp_subscriber_addr.sin_family = AF_INET;
   udp_subscriber_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -74,6 +81,10 @@ void init_tcp_client(int &tcp_sock_fd, struct sockaddr_in &tcp_subscriber_addr, 
   // se obtine un socket TCP pentru receptionarea conexiunilor
   tcp_sock_fd = socket(AF_INET, SOCK_STREAM, 0);
   DIE(tcp_sock_fd < 0, "[SERV] Error while creating TCP socket.");
+
+  // se dezactiveaza algoritmul lui Nagle
+  int flag = 1;
+  setsockopt(tcp_sock_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
 
   memset(&tcp_subscriber_addr, 0, sizeof(tcp_subscriber_addr));
   tcp_subscriber_addr.sin_family = AF_INET;
@@ -214,39 +225,96 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
           DIE(rec < 0, "[SERV] Error while receiving message from UDP client.");
 
           struct udp_message *udp_msg = (struct udp_message *)buffer;
-          // printf ("topic {%s} type {%u} content {%s}\n", udp_msg->topic, udp_msg->type, udp_msg->content);
 
           // incapsulare mesaj de la clientul UDP -> server -> clientul TCP
           struct udp_to_tcp_message msg;
           memset(&msg, 0, sizeof(struct udp_to_tcp_message));
           memcpy(msg.udp_ip, inet_ntoa(client_addr.sin_addr), 16);
           msg.udp_port = ntohs(client_addr.sin_port);
+
           memcpy(msg.topic, udp_msg->topic, TOPIC_SIZE);
+
           msg.type = udp_msg->type;
           memcpy(msg.content, udp_msg->content, CONTENT_LEN);
 
-          // cout << msg.udp_ip << ":" << msg.udp_port << " - " << msg.topic << " - " << msg.type << " - " << msg.content << endl;
-
           int msg_len = sizeof(struct udp_to_tcp_message);
-          // cout << "msg_len: " << msg_len << endl;
 
-          // se trimite mesajul catre clientii TCP
-          for (int j = 0; j < clients.size(); j++) {
-            if (clients[j].status == CONNECTED) {
-              if (find(clients[j].topics.begin(), clients[j].topics.end(), msg.topic) != clients[j].topics.end()) {
+          // copie a topic-ului primit de la clientul UDP (fara wildcards)
+          char *cpy = strdup(msg.topic);
+          
+          // se itereaza prin fiecare client
+          for (int client = 0; client < clients.size(); client++) {
+            // daca clientul e deconectat, se trece la urmatorul
+            if (clients[client].status == DISCONNECTED) {
+              continue;
+            }
+
+            if (find(clients[client].topics.begin(), clients[client].topics.end(), msg.topic) != clients[client].topics.end()) {
                 // se trimite dimensiunea mesajului catre client
-                rec = send_all(clients[j].tcp_sock_fd, &msg_len, sizeof(int));
+                rec = send_all(clients[client].tcp_sock_fd, &msg_len, sizeof(int));
                 DIE(rec < 0, "[SERV] Unable to send message's length to client.");
 
                 // se trimite mesajul catre clientul TCP
-                rec = send_all(clients[j].tcp_sock_fd, (void *)&msg, msg_len);
+                rec = send_all(clients[client].tcp_sock_fd, (void *)&msg, msg_len);
                 DIE(rec < 0, "[SERV] Error while sending message to client.");
+            } else {
+              // vectorul de topicuri a clientului
+              vector<string> topics = clients[client].topics;
 
-                // cout << "Message with topic " << msg.topic << " was sent to client " << clients[j].id << "." << endl;
+              // se itereaza prin lista de topicuri a clientului
+              for (int top = 0; top < topics.size(); top++) {
+                // se tokenaza topic-ul
+                char *topic = new char[topics[top].length() + 1];
+                strcpy(topic, topics[top].c_str());
+
+                // daca nu exista wildcards in topic, se trece la urmatorul topic
+                if (strchr(topic, '+') == NULL && strchr(topic, '*') == NULL) {
+                  continue;
+                }
+                
+                // resetare a copiei topic-ului
+                strcpy(cpy, msg.topic);
+
+                // topicul de la udp (fara wildcards)
+                char *seq1 = strtok_r(cpy, "/", &cpy);
+                // topicul de la client (cu wildcards)
+                char *seq2 = strtok_r(topic, "/", &topic);
+                while (seq2 != NULL && seq1 != NULL) {
+                  if (strcmp(seq1, seq2) == 0) {
+                    seq1 = strtok_r(NULL, "/", &cpy);
+                    seq2 = strtok_r(NULL, "/", &topic);
+                  } else if (strcmp(seq2, "+") == 0) {
+                    seq1 = strtok_r(NULL, "/", &cpy);
+                    seq2 = strtok_r(NULL, "/", &topic);
+                  } else if (strcmp(seq2, "*") == 0) {
+                    seq2 = strtok_r(NULL, "/", &topic);
+                    if (seq2 == NULL) {
+                      seq1 = NULL;
+                      break;
+                    }
+
+                    while (seq1 != NULL && strcmp(seq1, seq2) != 0) {
+                      seq1 = strtok_r(NULL, "/", &cpy);
+                    }
+                  } else {
+                    break;
+                  }
+                }
+
+                if (seq1 == NULL && seq2 == NULL) {
+                  // se trimite dimensiunea mesajului catre client
+                  rec = send_all(clients[client].tcp_sock_fd, &msg_len, sizeof(int));
+                  DIE(rec < 0, "[SERV] Unable to send message's length to client.");
+
+                  // se trimite mesajul catre clientul TCP
+                  rec = send_all(clients[client].tcp_sock_fd, (void *)&msg, msg_len);
+                  DIE(rec < 0, "[SERV] Error while sending message to client.");
+
+                  break;
+                }
               }
             }
           }
-
         } else if (poll_fds[i].fd == STDIN_FILENO) {
           // se citeste comanda de la tastatura
           memset(buffer, 0, BUFF_LEN);
@@ -305,15 +373,16 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
               }
             }
           } else if (strstr(buffer, "subscribe ") == buffer) {
-            char cpy[buff_len];
-            strcpy(cpy, buffer);
+            char *cpy = strdup(buffer);
+
             // se separa topic-ul de la mesaj
-            char *token = strtok(cpy, " ");
-            token = strtok(NULL, " ");
+            char *token = strtok_r(cpy, " ", &cpy);
+            token = strtok_r(NULL, " ", &cpy);
             token[strlen(token)] = '\0';
 
             for (int j = 0; j < clients.size(); j++) {
               if (clients[j].tcp_sock_fd == poll_fds[i].fd) {
+                // se adauga topic-ul in lista de topicuri a clientului
                 clients[j].topics.push_back(token);
 
                 // se trimite mesajul de confirmare catre client
@@ -335,11 +404,11 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
               }
             }
           } else if (strstr(buffer, "unsubscribe ") == buffer) {
-            char cpy[buff_len];
-            strcpy(cpy, buffer);
+            char *cpy = strdup(buffer);
+
             // se separa topic-ul de la mesaj
-            char *token = strtok(cpy, " ");
-            token = strtok(NULL, " ");
+            char *token = strtok_r(cpy, " ", &cpy);
+            token = strtok_r(NULL, " ", &cpy);
             token[strlen(token)] = '\0';
 
             for (int j = 0; j < clients.size(); j++) {
@@ -413,6 +482,5 @@ int main(int argc, char *argv[]) {
   close(udp_sock_fd);
   close(tcp_sock_fd);
 
-  cout << "Server closed." << endl;
   return 0;
 }
