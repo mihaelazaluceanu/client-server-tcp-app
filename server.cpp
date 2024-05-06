@@ -12,15 +12,11 @@
 #include <vector>
 #include <algorithm>
 #include <netinet/tcp.h>
-#include "helpers.h"
 #include "common.h"
 using namespace std;
 
 // vector de clienti TCP
 vector<struct tcp_client> clients;
-
-// vectori de topicuri
-// vector<string> topics;
 
 int recv_all(int sockfd, void *buffer, size_t len) {
     size_t bytes_received = 0;
@@ -113,9 +109,11 @@ int check_subscriber(char *new_id, int new_sock_fd) {
         return CONNECTED;
       } else {
         // clientul a mai fost conectat si s-a reconectat
-        clients[i].tcp_sock_fd = new_sock_fd;
         clients[i].status = CONNECTED;
+        // se actualizeaza socketul clientului
+        clients[i].tcp_sock_fd = new_sock_fd;
 
+        // se dezactiveaza algoritmul lui Nagle
         int flag = 1;
         setsockopt(new_sock_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
         
@@ -130,7 +128,8 @@ int check_subscriber(char *new_id, int new_sock_fd) {
   new_client.status = CONNECTED;
   memcpy(new_client.id, new_id, 10);
   clients.push_back(new_client);
-
+  
+  // se dezactiveaza algoritmul lui Nagle
   int flag = 1;
   setsockopt(new_sock_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
 
@@ -144,9 +143,11 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
   rec = listen(tcp_sock_fd, MAX_CONNECTIONS);
   DIE(rec < 0, "[SERV] Error while listening for connections.");
 
-  struct pollfd poll_fds[MAX_CONNECTIONS];
-  int num_clients = 3;
+  struct pollfd *poll_fds;
+  int max_clients = 50;
+  poll_fds = new struct pollfd[max_clients];
 
+  int num_clients = 3;
   // se adauga stdin ca un listener socket
   poll_fds[0].fd = STDIN_FILENO;
   poll_fds[0].events = POLLIN;
@@ -177,6 +178,13 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
           // se dezactiveaza algoritmul lui Nagle
           int flag = 1;
           rec = setsockopt(new_client_fd, IPPROTO_TCP, TCP_NODELAY, (char *) &flag, sizeof(int));
+
+          // se realoca spatiu pentru vectorul de poll_fds daca este nevoie
+          if (num_clients == max_clients) {
+            // se dubleaza dimensiunea vectorului de poll_fds
+            max_clients *= 2;
+            poll_fds = (struct pollfd *)realloc(poll_fds, max_clients * sizeof(struct pollfd));
+          }
 
           // se adauga noul socket in lista de socketuri
           poll_fds[num_clients].fd = new_client_fd;
@@ -210,9 +218,7 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
 
             close(new_client_fd);
             num_clients--;
-          } else if (status == DISCONNECTED) {
-            cout << "New client " << new_id << " connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << "." << endl;
-          } else if (status == FIRST_CONNECTION) {
+          } else {
             cout << "New client " << new_id << " connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << "." << endl;
           }
         } else if (poll_fds[i].fd == udp_sock_fd) {
@@ -229,43 +235,64 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
           // incapsulare mesaj de la clientul UDP -> server -> clientul TCP
           struct udp_to_tcp_message msg;
           memset(&msg, 0, sizeof(struct udp_to_tcp_message));
-          memcpy(msg.udp_ip, inet_ntoa(client_addr.sin_addr), 16);
-          msg.udp_port = ntohs(client_addr.sin_port);
 
-          memcpy(msg.topic, udp_msg->topic, TOPIC_SIZE);
+          // se seteaza adresa si portul clientului UDP
+          memcpy(msg.hdr.udp_ip, inet_ntoa(client_addr.sin_addr), 16);
+          msg.hdr.udp_port = ntohs(client_addr.sin_port);
 
-          msg.type = udp_msg->type;
-          memcpy(msg.content, udp_msg->content, CONTENT_LEN);
+          // se seteaza topic-ul si tipul mesajului
+          memcpy(msg.hdr.topic, udp_msg->topic, TOPIC_SIZE);
+          msg.hdr.type = udp_msg->type;
 
-          int msg_len = sizeof(struct udp_to_tcp_message);
+          // se seteaza dimensiunea continutului mesajului
+          if (udp_msg->type == 0) {
+            msg.hdr.content_len = sizeof(uint8_t) + sizeof(uint32_t);
+          } else if (udp_msg->type == 1) {
+            msg.hdr.content_len = sizeof(uint16_t);
+          } else if (udp_msg->type == 2) {
+            msg.hdr.content_len = sizeof(uint8_t) + sizeof(uint32_t) + sizeof(uint8_t);
+          } else {
+            msg.hdr.content_len = strlen(udp_msg->content);
+          }
 
-          // copie a topic-ului primit de la clientul UDP (fara wildcards)
-          char *cpy = strdup(msg.topic);
-          
+          // se aloca spatiu pentru continutul mesajului
+          msg.content = new char[msg.hdr.content_len];
+          memcpy(msg.content, udp_msg->content, msg.hdr.content_len);
+
+          // se seteaza dimensiunea header-ului mesajului
+          int hdr_len = sizeof(struct msg_header);
+
+          // copie a topic-ului primit de la clientul UDP --fara wildcards
+          char *cpy = strdup(msg.hdr.topic);
           // se itereaza prin fiecare client
-          for (int client = 0; client < clients.size(); client++) {
+          for (int x = 0; x < clients.size(); x++) {
             // daca clientul e deconectat, se trece la urmatorul
-            if (clients[client].status == DISCONNECTED) {
+            if (clients[x].status == DISCONNECTED) {
               continue;
             }
 
-            if (find(clients[client].topics.begin(), clients[client].topics.end(), msg.topic) != clients[client].topics.end()) {
-                // se trimite dimensiunea mesajului catre client
-                rec = send_all(clients[client].tcp_sock_fd, &msg_len, sizeof(int));
+            // se verifica daca clientul este abonat la topic-ul primit de la clientul UDP
+            if (find(clients[x].topics.begin(), clients[x].topics.end(), msg.hdr.topic) != clients[x].topics.end()) {
+                // se trimite dimensiunea header-ului catre client
+                rec = send_all(clients[x].tcp_sock_fd, &hdr_len, sizeof(int));
                 DIE(rec < 0, "[SERV] Unable to send message's length to client.");
 
-                // se trimite mesajul catre clientul TCP
-                rec = send_all(clients[client].tcp_sock_fd, (void *)&msg, msg_len);
+                // se trimite headerul catre clientul TCP
+                rec = send_all(clients[x].tcp_sock_fd, &msg.hdr, hdr_len);
                 DIE(rec < 0, "[SERV] Error while sending message to client.");
+
+                // se trimite continutul mesajului catre clientul TCP
+                rec = send_all(clients[x].tcp_sock_fd, msg.content, msg.hdr.content_len);
+                DIE(rec < 0, "[SERV] Error while sending message content to client.");
             } else {
               // vectorul de topicuri a clientului
-              vector<string> topics = clients[client].topics;
+              vector<string> topics = clients[x].topics;
 
-              // se itereaza prin lista de topicuri a clientului
-              for (int top = 0; top < topics.size(); top++) {
-                // se tokenaza topic-ul
-                char *topic = new char[topics[top].length() + 1];
-                strcpy(topic, topics[top].c_str());
+              // se itereaza prin vectorul de topicuri a clientului
+              for (int y = 0; y < topics.size(); y++) {
+                char *topic = new char[topics[y].length() + 1];
+                // se adauga un caracter NULL la finalul topic-ului
+                strcpy(topic, topics[y].c_str());
 
                 // daca nu exista wildcards in topic, se trece la urmatorul topic
                 if (strchr(topic, '+') == NULL && strchr(topic, '*') == NULL) {
@@ -273,11 +300,11 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
                 }
                 
                 // resetare a copiei topic-ului
-                strcpy(cpy, msg.topic);
+                strcpy(cpy, msg.hdr.topic);
 
-                // topicul de la udp (fara wildcards)
+                // topicul de la udp --fara wildcards
                 char *seq1 = strtok_r(cpy, "/", &cpy);
-                // topicul de la client (cu wildcards)
+                // topicul de la client -cu wildcards
                 char *seq2 = strtok_r(topic, "/", &topic);
                 while (seq2 != NULL && seq1 != NULL) {
                   if (strcmp(seq1, seq2) == 0) {
@@ -303,12 +330,16 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
 
                 if (seq1 == NULL && seq2 == NULL) {
                   // se trimite dimensiunea mesajului catre client
-                  rec = send_all(clients[client].tcp_sock_fd, &msg_len, sizeof(int));
+                  rec = send_all(clients[x].tcp_sock_fd, &hdr_len, sizeof(int));
                   DIE(rec < 0, "[SERV] Unable to send message's length to client.");
 
                   // se trimite mesajul catre clientul TCP
-                  rec = send_all(clients[client].tcp_sock_fd, (void *)&msg, msg_len);
+                  rec = send_all(clients[x].tcp_sock_fd, &(msg.hdr), hdr_len);
                   DIE(rec < 0, "[SERV] Error while sending message to client.");
+
+                  // se trimite continutul mesajului catre clientul TCP
+                  rec = send_all(clients[x].tcp_sock_fd, msg.content, msg.hdr.content_len);
+                  DIE(rec < 0, "[SERV] Error while sending message content to client.");
 
                   break;
                 }
@@ -351,7 +382,7 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
             cout << "Invalid command." << endl;
           }
         } else {
-          // se primeste un dimensiunea mesajului de la un client TCP
+          // se primeste dimensiunea mesajului de la un client TCP
           int buff_len;
           rec = recv_all(poll_fds[i].fd, &buff_len, sizeof(int));
           DIE(rec < 0, "[SERV] Error while receiving message length from client.");
@@ -372,7 +403,7 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
                 break;
               }
             }
-          } else if (strstr(buffer, "subscribe ") == buffer) {
+          } else if (strstr(buffer, "subscribe") == buffer) {
             char *cpy = strdup(buffer);
 
             // se separa topic-ul de la mesaj
@@ -403,7 +434,7 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
                 break;
               }
             }
-          } else if (strstr(buffer, "unsubscribe ") == buffer) {
+          } else if (strstr(buffer, "unsubscribe") == buffer) {
             char *cpy = strdup(buffer);
 
             // se separa topic-ul de la mesaj
@@ -433,6 +464,8 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
                 break;
               }
             }
+          } else {
+            cout << "Invalid command." << endl;
           }
         }
       }
@@ -442,18 +475,26 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
 
 int main(int argc, char *argv[]) {
   setvbuf(stdout, NULL, _IONBF, BUFSIZ);
-  
+  // se verifica daca numarul de argumente este valid
+  if (argc != 2) {
+    DIE(true, "[SERV] Usage: ./server <PORT>");
+  }
+
   int rec;
   // se parseaza port-ul ca un numar
   uint16_t port;
   rec = sscanf(argv[1], "%hu", &port);
-  DIE(rec != 1, "[SERV] Given port is invalid.");
+  DIE(rec != 1, "[SERV] Error while reading the port.");
+
+  // se verifica daca port-ul este valid
+  if (port < 1024 || port > 65535) {
+    DIE(true, "[SERV] Invalid port.");
+  }
 
   // se completeaza in serv_addr adresa serverului, familia de adrese si portul
   struct sockaddr_in serv_addr;
   socklen_t socket_len;
   set_server_addr(serv_addr, port, &socket_len);
-  // cout << serv_addr.sin_addr.s_addr << endl;
 
   // se obtine un socket UDP pentru receptionarea conexiunilor
   int udp_sock_fd;
@@ -478,7 +519,7 @@ int main(int argc, char *argv[]) {
   // se pornește serverul
   start_server(tcp_sock_fd, udp_sock_fd);
 
-  // se inchid cele doua socketuri
+  // se inchid conexiunile
   close(udp_sock_fd);
   close(tcp_sock_fd);
 

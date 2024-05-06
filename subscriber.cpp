@@ -6,7 +6,6 @@
 #include <unistd.h>
 #include <vector>
 #include "common.h"
-#include "helpers.h"
 #include <iomanip>
 #include <cmath>
 #include <netinet/tcp.h>
@@ -101,7 +100,7 @@ void start_client(int sockfd) {
                 close(sockfd);
                 close(STDIN_FILENO);
                 exit(0);
-            } else {
+            } else if ((strstr(buffer, "subscribe") == buffer) || (strstr(buffer, "unsubscribe") == buffer)) {
                 int buff_len = strlen(buffer);
                 // se trimite dimensiunea buffer-ului catre server
                 rec = send_all(sockfd, &buff_len, sizeof(int));
@@ -110,6 +109,8 @@ void start_client(int sockfd) {
                 // se trimite mesajul catre server
                 rec = send_all(sockfd, (void *)buffer, buff_len);
                 DIE(rec < 0, "[CLIENT] Unable to send message.");
+            } else {
+                cout << "Invalid command." << endl;
             }
         } else if (poll_fds[1].revents & POLLIN != 0) {
             // se primeste mesaj de la server
@@ -128,40 +129,63 @@ void start_client(int sockfd) {
                 // se inchide conexiunea
                 close(sockfd);
                 exit(0);
-            // se confirma abonarea/dezabonarea clientului la un topic
             } else if ((strstr(buffer, "Subscribed") != NULL) || (strstr(buffer, "Unsubscribed") != NULL)) {
+                // se confirma abonarea/dezabonarea clientului la un topic
                 cout << buffer << endl;
-            // a fost receptionat un mesaj UDP
             } else if (rec > 50) {
-                char ip[16];
-                strncpy(ip, buffer, 15);
-                ip[16] = '\0';
-                uint16_t port = *(uint16_t *)(buffer + 16);
-                
-                struct udp_message *udp_message = (struct udp_message *)(buffer + sizeof(ip) + sizeof(port));
+                // a fost receptionat un mesaj UDP
+                struct udp_to_tcp_message udp_message;
+                memcpy(&udp_message.hdr, buffer, sizeof(struct msg_header));
 
-                if (udp_message->type == 0) {
-                    uint8_t sign_byte = udp_message->content[0];
-                    uint32_t nr = ntohl(*(uint32_t *)(udp_message->content + 1));
+                // se verifica daca topic-ul este valid
+                if (strlen(udp_message.hdr.topic) > 50) {
+                    DIE(true, "[CLIENT] Invalid topic.");
+                    continue;
+                }
+
+                udp_message.content = new char[udp_message.hdr.content_len];
+                // se primeste continutul mesajului UDP
+                rec = recv_all(sockfd, udp_message.content, udp_message.hdr.content_len);
+                DIE(rec < 0, "[CLIENT] Unable to receive the message content from the server.");
+                
+                // se creaza introducerea comuna pentru afisare
+                char comm[100];
+                memset(comm, 0, 100);
+                strcpy(comm, udp_message.hdr.udp_ip);
+                strcat(comm, ":");
+                strcat(comm, to_string(udp_message.hdr.udp_port).c_str());
+                strcat(comm, " - ");
+                strcat(comm, udp_message.hdr.topic);
+                strcat(comm, " - ");
+
+                if (udp_message.hdr.type == 0) {
+                    uint8_t sign_byte = udp_message.content[0];
+                    uint32_t nr = ntohl(*(uint32_t *)(udp_message.content + 1));
                     int print = nr;
 
                     if (sign_byte == 1) {
                         print = -print;
                     }
 
-                    cout << udp_message->topic << " - " << "INT - " << print << endl;
-                } else if (udp_message->type == 1) {
-                    cout << udp_message->topic << " - " << "SHORT_REAL - " << fixed << setprecision(2) << (ntohs(*(uint16_t *)(udp_message->content))) / 100.0 << endl;
-                } else if (udp_message->type == 2) {
-                    uint8_t sign_byte = udp_message->content[0];
-                    uint32_t nr = ntohl(*(uint32_t *) (udp_message->content + 1));
-                    uint8_t power = udp_message->content[5];
+                    cout << comm << "INT - " << print << endl;
+                } else if (udp_message.hdr.type == 1) {
+                    uint16_t nr = ntohs(*(uint16_t *)(udp_message.content));
+                    cout << comm << "SHORT_REAL - " << fixed << setprecision(2) << nr / 100.0 << endl;
+                } else if (udp_message.hdr.type == 2) {
+                    uint8_t sign_byte = udp_message.content[0];
+                    uint32_t nr = ntohl(*(uint32_t *) (udp_message.content + 1));
+                    uint8_t power = udp_message.content[5];
                     float div = pow(10, power);
                     float result = nr / div;
-                    cout << udp_message->topic << " - " << "FLOAT - " << (sign_byte == 1 ? "-" : "") << fixed << setprecision(power) << result << endl;
+                    float print = result;
 
-                } else if (udp_message->type == 3) {
-                    cout << udp_message->topic << " - " << "STRING - " << udp_message->content << endl;
+                    if (sign_byte == 1) {
+                        print = -print;
+                    }
+
+                    cout << comm << "FLOAT - " << fixed << setprecision(power) << print << endl;
+                } else if (udp_message.hdr.type == 3) {
+                    cout << comm << "STRING - " << udp_message.content << endl;
                 }
             }
 
@@ -172,12 +196,31 @@ void start_client(int sockfd) {
 
 int main(int argc, char *argv[]) {
     setvbuf(stdout, NULL, _IONBF, BUFSIZ);
-    int rec;
+    // se verifica numarul de argumente
+    if (argc != 4) {
+        DIE(true, "[CLIENT] Usage: ./subscriber <ID_CLIENT> <IP_SERVER> <PORT_SERVER>");
+    }
 
+    // se verifica daca ID-ul clientului este valid
+    if (strlen(argv[1]) > ID_LEN) {
+        DIE(true, "[CLIENT] Invalid client ID.");
+    }
+
+    // se verifica daca adresa IP a serverului este valida
+    if (inet_addr(argv[2]) == INADDR_NONE) {
+        DIE(true, "[CLIENT] Invalid server IP.");
+    }
+
+    int rec;
     // se parseaza port-ul ca un numar
     uint16_t port;
     rec = sscanf(argv[3], "%hu", &port);
-    DIE(rec != 1, "[CLIENT] Given port is invalid.");
+    DIE(rec != 1, "[CLIENT] Error while parsing port.");
+
+    // se verifica daca port-ul este valid
+    if (port < 1024 || port > 65535) {
+        DIE(true, "[CLIENT] Invalid port.");
+    }
 
     // se creaza un socket TCP pentru subscriber
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -201,11 +244,14 @@ int main(int argc, char *argv[]) {
     memset(client_id, 0, ID_LEN + 1);
     strcpy(client_id, argv[1]);
 
+    // se trimite ID-ul clientului catre server
     rec = send_all(sockfd, (void *)client_id, ID_LEN + 1);
     DIE(rec < 0, "[CLIENT] Unable to send client's ID.");
 
+    // se porneste clientul
     start_client(sockfd);
 
+    // se inchide conexiunea
     close(sockfd);
 
     return 0;
