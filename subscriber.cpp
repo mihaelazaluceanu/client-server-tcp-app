@@ -17,11 +17,8 @@ int recv_all(int sockfd, void *buffer, size_t len) {
     char *buff = (char *)buffer;
 
     while(bytes_remaining) {
-        ssize_t rec = recv(sockfd, buff + bytes_received, bytes_remaining, 0);
-        if (rec < 0) {
-            cerr << "An error occured.";
-            return -1;
-        }
+        int rec = recv(sockfd, buff + bytes_received, bytes_remaining, 0);
+        DIE(rec < 0, "[SERV] Error while receiving bytes from client.");
 
         bytes_received += rec;
         bytes_remaining -= rec;
@@ -36,11 +33,8 @@ int send_all(int sockfd, void *buffer, size_t len) {
     char *buff = (char *)buffer;
 
     while(bytes_remaining) {
-        ssize_t rec = send(sockfd, buff + bytes_sent, bytes_remaining, 0);
-        if (rec < 0) {
-            cerr << "An error occured.";
-            return -1;
-        }
+        int rec = send(sockfd, buff + bytes_sent, bytes_remaining, 0);
+        DIE(rec < 0, "[SERV] Error while sending bytes to client.");
         
         bytes_sent += rec;
         bytes_remaining -= rec;
@@ -98,7 +92,6 @@ void start_client(int sockfd) {
                 memset(buffer, 0, BUFF_LEN);
                 // se inchide conexiunea
                 close(sockfd);
-                close(STDIN_FILENO);
                 exit(0);
             } else if ((strstr(buffer, "subscribe") == buffer) || (strstr(buffer, "unsubscribe") == buffer)) {
                 int buff_len = strlen(buffer);

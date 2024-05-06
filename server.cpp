@@ -25,10 +25,7 @@ int recv_all(int sockfd, void *buffer, size_t len) {
 
     while(bytes_remaining) {
         int rec = recv(sockfd, buff + bytes_received, bytes_remaining, 0);
-        if (rec < 0) {
-            cerr << "An error occured.";
-            return -1;
-        }
+        DIE(rec < 0, "[SERV] Error while receiving bytes from client.");
 
         bytes_received += rec;
         bytes_remaining -= rec;
@@ -44,10 +41,7 @@ int send_all(int sockfd, void *buffer, size_t len) {
 
     while(bytes_remaining) {
         int rec = send(sockfd, buff + bytes_sent, bytes_remaining, 0);
-        if (rec < 0) {
-            cerr << "An error occured.";
-            return -1;
-        }
+        DIE(rec < 0, "[SERV] Error while sending bytes to client.");
         
         bytes_sent += rec;
         bytes_remaining -= rec;
@@ -373,7 +367,6 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
               // se trimite mesajul catre client
               rec = send_all(poll_fds[j].fd, (void *)buffer, buff_len);
               DIE(rec < 0, "[SERV] Error while sending the exit message to client.");
-              close(poll_fds[j].fd);
             }
 
             memset(buffer, 0, BUFF_LEN);
@@ -398,7 +391,6 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
               if (clients[j].tcp_sock_fd == poll_fds[i].fd) {
                 cout << "Client " << clients[j].id << " disconnected." << endl;
                 clients[j].status = DISCONNECTED;
-                close(poll_fds[i].fd);
                 poll_fds[i].fd = -1;
                 break;
               }
@@ -416,7 +408,7 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
                 // se adauga topic-ul in lista de topicuri a clientului
                 clients[j].topics.push_back(token);
 
-                // se trimite mesajul de confirmare catre client
+                // se creaza mesajul de confirmare
                 memset(buffer, 0, BUFF_LEN);
                 memcpy(buffer, "Subscribed to topic ", 20);
                 buffer[strlen(buffer)] = '\0';
@@ -446,7 +438,7 @@ void start_server(int tcp_sock_fd, int udp_sock_fd) {
               if (clients[j].tcp_sock_fd == poll_fds[i].fd) {
                 clients[j].topics.erase(remove(clients[j].topics.begin(), clients[j].topics.end(), token), clients[j].topics.end());
 
-                // se trimite mesajul de confirmare catre client
+                // se creaza mesajul de confirmare
                 memset(buffer, 0, BUFF_LEN);
                 memcpy(buffer, "Unsubscribed from topic ", 24);
                 buffer[strlen(buffer)] = '\0';
