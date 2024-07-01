@@ -624,7 +624,6 @@ def run_test_c2_subscribe_plus_wildcard(c2, topics):
   if success:
     pass_test("c2_subscribe_plus_wildcard")
 
-
 def run_test_c2_subscribe_star_wildcard(c2, topics):
   """Tests that subscriber C2 can subscribe to a topic with wildcard."""
   # setup the test
