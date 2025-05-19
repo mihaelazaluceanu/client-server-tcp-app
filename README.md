@@ -1,4 +1,4 @@
-# Tema 2 - Aplicatie client-server TCP si UDP pentru gestionarea mesajelor
+# Aplicatie client-server TCP si UDP pentru gestionarea mesajelor
 
 ### 1. Flow-ul general al server-ului
 Pentru retinerea tuturor clientilor conectati vreodata la server, am folosit un
