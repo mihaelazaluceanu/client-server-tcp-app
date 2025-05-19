@@ -104,7 +104,3 @@ Am verificat validitatea argumentelor de executie a programului *server* si *sub
 Am verificat ca serverul sa accepte doar comanda de `exit` de la **STDIN** si comenzi precum `subscribe` si `unsubscribe` de la clientii **TCP**.
 
 Pentru clienti, am asigurat ca primesc comenzi de la **STDIN** de tipul `exit`, `subscribe`, `unsubscribe`, altele fiind considerate invalide.
-
-Pentru rezolvarea temei am utilizat un sleepday.
-
-**324CC Zaluceanu Mihaela**
